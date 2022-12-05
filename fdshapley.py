@@ -1,21 +1,47 @@
-from typing import List, Callable
+from itertools import permutations
+from math import factorial
+from typing import List
 
 import numpy as np
+from sklearn.linear_model import LogisticRegression
 
 
 class FederatedShapley:
-    def __init__(self, data: List[np.ndarray], u: Callable[[np.ndarray], float], r: float) -> None:
+    def __init__(self, data_train: List[List[np.ndarray]], data_test: List[np.ndarray], clf_params: dict) -> None:
         """
-        :param data: List of datasets, one per participant
-        :param u: valuation function
-        :param r: max of u
+        :param data_train: Training data (data and labels) of all participants : [[x_1,y_1], ..., [x_N, y_N]]
+        :param data_test:  Test data (data and labels): [x_test, y_test]
+        :param clf_params: Parameters for the LogisticRegression
         """
-        self.data = data
-        self.N = len(data)
-        self.u = u
-        self.r = r
-        self.w = np.ones(10)
+        self.data_train = data_train
+        self.data_test = data_test
+        self.N = len(data_train)
+
+        self.clf_params = clf_params
+        self.clf_params["warm_start"] = True
+        self.clf_params["max_iter"] = 1
+        self.clf_params["fit_intercept"] = False
+
+        self.clf = LogisticRegression(**self.clf_params)
+        self.clf.intercept_ = np.zeros(10)
+        self.clf.classes_ = np.arange(10)
+
+        _, d = self.data_train[0][0].shape
+
+        self.w = np.random.rand(10, d) * 1e-3
+
         self.rng = None
+        self.gamma = 1e-3
+
+    def u(self, w: np.ndarray) -> float:
+        """
+        Compute the value of a set of weights (here, simply the accuracy)
+        :param w: Weights
+        :return: Score
+        """
+        self.clf.coef_ = w
+        X_test, y_test = self.data_test
+        return self.clf.score(X_test, y_test)
 
     @staticmethod
     def update_weights(w: np.ndarray, update: np.ndarray) -> np.ndarray:
@@ -33,30 +59,29 @@ class FederatedShapley:
         :param k: ID of the participant
         :return: Weights update
         """
-        # TODO
-        return np.zeros_like(self.w)
+        self.clf.coef_ = self.w
+        xk, yk = self.data_train[k]
+        self.clf.fit(xk, yk)
+        update = self.clf.coef_ - self.w
+        return update / np.linalg.norm(update) * self.gamma  # TODO
 
-    def roundSVEstimation(self, updates: List[np.ndarray], eps: float, delta: float) -> np.ndarray:
+    def roundSVEstimation(self, updates: List[np.ndarray]) -> np.ndarray:
         """
         Computes Shapley values for participants at a given round
         :param updates: Weights updates for the round's participants
-        :param eps: epsilon parameter
-        :param delta: delta parameter
         :return: shapley values for the round
         """
         m = len(updates)
-        A = int(2 * self.r ** 2 / eps ** 2 * np.log(2 * m / delta))
         s_hat = np.zeros(m)
-        for a in range(A):
+        for permut in permutations(updates):
             uprev = self.u(self.w)
-            permut = self.rng.permutation(updates)
-            w = self.w
+            w = self.w.copy()
             for i, update in enumerate(permut):
                 w = self.update_weights(w, update)
                 unew = self.u(w)
                 s_hat[i] += unew - uprev
                 uprev = unew
-        s_hat /= A
+        s_hat /= factorial(len(updates))
         return s_hat
 
     @staticmethod
@@ -72,25 +97,28 @@ class FederatedShapley:
             return value
         raise ValueError
 
-    def federatedSVEstimation(self, C: float, T: int, aggregation="sum", eps=0.1, delta=0.1, seed=None) -> np.ndarray:
+    def federatedSVEstimation(self, C: float, T: int, aggregation="sum", seed=None) -> np.ndarray:
         """
         Federated learning loop with Federated Shapley value computation
         :param C: Fraction of selected participants in each round
         :param T: Number of rounds
         :param aggregation: Weighting method
         :param eps: epsilon parameter
-        :param delta: delta parameter
+        :param delta: delta parameters
         :param seed: seed for the random numbers generator
         :return: Federated Data Shapley values
         """
         self.rng = np.random.default_rng(seed)
         S_hat = np.zeros(self.N)
         for t in range(T):
+            # print(t)
             m = int(C * self.N)
             participants = np.random.choice(self.N, size=m, replace=False)
+            # print(participants)
             updates = [self.participant_update(k)
                        for k in participants]
-            shapley_values = self.roundSVEstimation(updates, eps, delta)
+            shapley_values = self.roundSVEstimation(updates)
             S_hat[participants] += self.weighted_shapley_values(shapley_values, t, aggregation)
-            self.w = self.update_weights(self.w, np.mean(updates))
+            self.w = self.update_weights(self.w, sum(updates) / len(updates))
+            # print(self.u(self.w))
         return S_hat
