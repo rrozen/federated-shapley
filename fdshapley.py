@@ -4,10 +4,11 @@ from typing import List
 
 import numpy as np
 from sklearn.linear_model import LogisticRegression
-
+from sklearn.base import clone
+from tqdm import tqdm
 
 class FederatedShapley:
-    def __init__(self, data_train: List[List[np.ndarray]], data_test: List[np.ndarray], clf_params: dict) -> None:
+    def __init__(self, data_train: List[List[np.ndarray]], data_test: List[np.ndarray], clf_params: dict = {}) -> None:
         """
         :param data_train: Training data (data and labels) of all participants : [[x_1,y_1], ..., [x_N, y_N]]
         :param data_test:  Test data (data and labels): [x_test, y_test]
@@ -18,20 +19,22 @@ class FederatedShapley:
         self.N = len(data_train)
 
         self.clf_params = clf_params
-        self.clf_params["warm_start"] = True
-        self.clf_params["max_iter"] = 1
-        self.clf_params["fit_intercept"] = False
-
+        self.clf_params.update({
+                'max_iter': 1, 
+                'warm_start': True,
+                'fit_intercept':False
+            })
+        
         self.clf = LogisticRegression(**self.clf_params)
         self.clf.intercept_ = np.zeros(10)
-        self.clf.classes_ = np.arange(10)
+        self.clf.classes_ = np.array(np.arange(10), dtype=str)
 
         _, d = self.data_train[0][0].shape
 
         self.w = np.random.rand(10, d) * 1e-3
 
         self.rng = None
-        self.gamma = 1e-3
+        self.gamma = 1e-2
 
     def u(self, w: np.ndarray) -> float:
         """
@@ -59,11 +62,12 @@ class FederatedShapley:
         :param k: ID of the participant
         :return: Weights update
         """
-        self.clf.coef_ = self.w
+        clf = clone(self.clf)
+        clf.coef_ = self.w.copy()
         xk, yk = self.data_train[k]
-        self.clf.fit(xk, yk)
-        update = self.clf.coef_ - self.w
-        return update / np.linalg.norm(update) * self.gamma  # TODO
+        clf.fit(xk, yk)
+        update = clf.coef_ - self.w
+        return update * self.gamma  # TODO
 
     def roundSVEstimation(self, updates: List[np.ndarray]) -> np.ndarray:
         """
@@ -110,15 +114,26 @@ class FederatedShapley:
         """
         self.rng = np.random.default_rng(seed)
         S_hat = np.zeros(self.N)
-        for t in range(T):
-            # print(t)
+        #print("score", self.u(self.w))
+
+        first_participation = [T]*self.N
+
+        for t in tqdm(range(T)):   
             m = int(C * self.N)
             participants = np.random.choice(self.N, size=m, replace=False)
-            # print(participants)
-            updates = [self.participant_update(k)
-                       for k in participants]
+            for x in participants:
+                if first_participation[x] == T:
+                    first_participation[x] = t
+            updates = [self.participant_update(k) for k in participants]
             shapley_values = self.roundSVEstimation(updates)
             S_hat[participants] += self.weighted_shapley_values(shapley_values, t, aggregation)
-            self.w = self.update_weights(self.w, sum(updates) / len(updates))
-            # print(self.u(self.w))
-        return S_hat
+            self.w = self.update_weights(self.w, sum(updates))
+
+
+            #print(f"{t=}") 
+            #print(participants, shapley_values)
+            #print("sum shapley", sum(shapley_values))
+            #print("score", self.u(self.w))
+            #print(S_hat)
+          
+        return S_hat, first_participation
