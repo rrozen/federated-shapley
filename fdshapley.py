@@ -1,14 +1,16 @@
 from itertools import permutations
 from math import factorial
-from typing import List
+from typing import List, Tuple
 
 import numpy as np
-from sklearn.linear_model import LogisticRegression
 from sklearn.base import clone
+from sklearn.linear_model import LogisticRegression
 from tqdm import tqdm
 
+
 class FederatedShapley:
-    def __init__(self, data_train: List[List[np.ndarray]], data_test: List[np.ndarray], clf_params: dict = {}) -> None:
+    def __init__(self, data_train: List[List[np.ndarray]], data_test: List[np.ndarray],
+                 clf_params: dict = None) -> None:
         """
         :param data_train: Training data (data and labels) of all participants : [[x_1,y_1], ..., [x_N, y_N]]
         :param data_test:  Test data (data and labels): [x_test, y_test]
@@ -18,23 +20,24 @@ class FederatedShapley:
         self.data_test = data_test
         self.N = len(data_train)
 
-        self.clf_params = clf_params
+        self.clf_params = clf_params if clf_params is not None else {}
         self.clf_params.update({
-                'max_iter': 1, 
-                'warm_start': True,
-                'fit_intercept':False
-            })
-        
+            'max_iter': 1,
+            'warm_start': True,
+            'fit_intercept': False
+        })
+
         self.clf = LogisticRegression(**self.clf_params)
         self.clf.intercept_ = np.zeros(10)
         self.clf.classes_ = np.array(np.arange(10), dtype=str)
 
         _, d = self.data_train[0][0].shape
+        self.d = d
 
         self.w = np.random.rand(10, d) * 1e-3
 
         self.rng = None
-        self.gamma = 1e-2
+        self.gamma = 1e-1
 
     def u(self, w: np.ndarray) -> float:
         """
@@ -67,7 +70,7 @@ class FederatedShapley:
         xk, yk = self.data_train[k]
         clf.fit(xk, yk)
         update = clf.coef_ - self.w
-        return update * self.gamma  # TODO
+        return update * self.gamma
 
     def roundSVEstimation(self, updates: List[np.ndarray]) -> np.ndarray:
         """
@@ -101,24 +104,22 @@ class FederatedShapley:
             return value
         raise ValueError
 
-    def federatedSVEstimation(self, C: float, T: int, aggregation="sum", seed=None) -> np.ndarray:
+    def federatedSVEstimation(self, C: float, T: int, aggregation="sum", seed=None) -> Tuple[np.ndarray, list]:
         """
         Federated learning loop with Federated Shapley value computation
         :param C: Fraction of selected participants in each round
         :param T: Number of rounds
         :param aggregation: Weighting method
-        :param eps: epsilon parameter
-        :param delta: delta parameters
         :param seed: seed for the random numbers generator
         :return: Federated Data Shapley values
         """
         self.rng = np.random.default_rng(seed)
         S_hat = np.zeros(self.N)
-        #print("score", self.u(self.w))
+        # print("score", self.u(self.w))
 
-        first_participation = [T]*self.N
+        first_participation = [T] * self.N
 
-        for t in tqdm(range(T)):   
+        for t in tqdm(range(T)):
             m = int(C * self.N)
             participants = np.random.choice(self.N, size=m, replace=False)
             for x in participants:
@@ -129,11 +130,36 @@ class FederatedShapley:
             S_hat[participants] += self.weighted_shapley_values(shapley_values, t, aggregation)
             self.w = self.update_weights(self.w, sum(updates))
 
+            # print(f"{t=}")
+            # print(participants, shapley_values)
+            # print("sum shapley", sum(shapley_values))
+            # print("score", self.u(self.w))
+            # print(S_hat)
 
-            #print(f"{t=}") 
-            #print(participants, shapley_values)
-            #print("sum shapley", sum(shapley_values))
-            #print("score", self.u(self.w))
-            #print(S_hat)
-          
-        return S_hat, first_participation
+        return S_hat, first_participation  # return participants at all rounds
+
+    def originalDataShapley(self, T=100, trunc=5, warm_start: dict = None):
+        if warm_start is not None:
+            s_hat = warm_start['s_hat']
+            Tprev = warm_start['Tprev']
+            s_hat *= Tprev
+        else:
+            s_hat = np.zeros(self.N)
+            Tprev = 0
+        rng = np.random.default_rng()
+        X_test, y_test = self.data_test
+        for _ in tqdm(range(T)):
+            permut = rng.permutation(self.N)
+            clf = LogisticRegression(fit_intercept=False)
+            uprev = 0
+            x, y = np.array([[] for _ in range(self.d)]).T, []
+            # print(permut[:trunc])
+            for k in permut[:trunc]:
+                x, y = np.concatenate((x, self.data_train[k][0])), np.concatenate((y, self.data_train[k][1]))
+                clf.fit(x, y)
+                unew = clf.score(X_test, y_test)
+                s_hat[k] += unew - uprev
+                # print(unew - uprev)
+                # print(unew)
+                uprev = unew
+        return s_hat / (T + Tprev)
