@@ -92,19 +92,32 @@ class FederatedShapley:
         return s_hat
 
     @staticmethod
-    def weighted_shapley_values(value: np.ndarray, t: int, aggregation: str):
+    def weighted_shapley_values(value: np.ndarray, t: int, acc: float, agg: tuple):
         """
         Weight the Shapley value according to the round (maybe other parameters can be considered).
         :param value: Shapley values
         :param t: Round number
-        :param aggregation: Weighting method
+        :param acc: Accuracy
+        :param agg: Weighting method
         :return: Weighted Shapley values
         """
-        if aggregation == "sum":
+        a = 0
+        if agg[0] == "sum":
             return value
+        elif agg[0] == "normalize":
+            norm = np.linalg.norm(value)
+            return value/norm if norm > 1e-10 else value
+        elif agg[0] == "linear_t":
+            return (a + t * agg[1]) * value
+        elif agg[0] == "linear_acc":
+            return (a + acc * agg[1]) * value
+        elif agg[0] == "exp_t":
+            return np.exp(agg[1] * t) * value
+        elif agg[0] == "exp_acc":
+            return np.exp(agg[1] * acc) * value
         raise ValueError
 
-    def federatedSVEstimation(self, C: float, T: int, aggregation="sum", seed=None) -> Tuple[np.ndarray, list]:
+    def federatedSVEstimation(self, C: float, T: int, aggregation=("sum",), seed=None) -> Tuple[np.ndarray, dict]:
         """
         Federated learning loop with Federated Shapley value computation
         :param C: Fraction of selected participants in each round
@@ -119,24 +132,39 @@ class FederatedShapley:
 
         first_participation = [T] * self.N
 
+        all_diffs = []
+        accs = []
+        all_participants = []
         for t in tqdm(range(T)):
             m = int(C * self.N)
             participants = np.random.choice(self.N, size=m, replace=False)
+            all_participants.append(participants)
             for x in participants:
                 if first_participation[x] == T:
                     first_participation[x] = t
             updates = [self.participant_update(k) for k in participants]
             shapley_values = self.roundSVEstimation(updates)
-            S_hat[participants] += self.weighted_shapley_values(shapley_values, t, aggregation)
+            prev_score = self.u(self.w)
+            S_hat[participants] += self.weighted_shapley_values(shapley_values, t, prev_score, aggregation)
             self.w = self.update_weights(self.w, sum(updates))
 
             # print(f"{t=}")
             # print(participants, shapley_values)
-            # print("sum shapley", sum(shapley_values))
-            # print("score", self.u(self.w))
+            sum_shap = sum(shapley_values)
+            all_diffs.append(sum_shap)
+            # print("sum shapley", sum_shap)
+            score = self.u(self.w)
+            accs.append(score)
+            # print("score", score)
             # print(S_hat)
 
-        return S_hat, first_participation  # return participants at all rounds
+        log = {
+            "first": first_participation,
+            "all_participants": all_participants,
+            "all_diffs": np.array(all_diffs),
+            "accs": np.array(accs)
+        }
+        return S_hat / np.sum(S_hat), log
 
     def originalDataShapley(self, T=100, trunc=5, warm_start: dict = None):
         if warm_start is not None:
